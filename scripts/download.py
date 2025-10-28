@@ -3,10 +3,10 @@ download.py
 author: Connor Hainje
 
 usage:
-python download.py 60906 -N 8
-
-@TODO: test download from AWS instead of IPAC for speed
+python download.py 60906 -N 8 --use-aws
 """
+
+import boto3
 
 from argparse import ArgumentParser
 from astroquery.ipac.irsa import Irsa
@@ -38,6 +38,11 @@ def parse():
         default=8,
         help="number of workers",
     )
+    ap.add_argument(
+        "--use-aws",
+        action="store_true",
+        help="download files from AWS instead of IRSA",
+    )
     args = ap.parse_args()
 
     # validation
@@ -54,6 +59,16 @@ def download_file(url, folder, session=None):
     response = session.get(url) if session is not None else get(url)
     with open(filepath, "wb") as f:
         f.write(response.content)
+    return filepath
+
+
+def download_file_from_s3(url, folder, s3):
+    filepath = folder / basename(url)
+    if filepath.exists():
+        return None
+
+    s3_key = url.split("spherex/")[1]
+    s3.download_file("nasa-irsa-spherex", s3_key, filepath)
     return filepath
 
 
@@ -85,24 +100,48 @@ def main():
         print("  --no-download specified: stopping!")
         return
 
-    if args.num_workers == 1:
-        # don't bother with parallelization if only using 1 worker
-        for url in tqdm(new_urls):
-            download_file(url, folder)
+    if args.use_aws:
+        s3 = boto3.client("s3")
+        print(f"starting downloads from S3 using {args.num_workers} workers")
+
+        if args.num_workers == 1:
+            for url in tqdm(new_urls):
+                download_file_from_s3(url, folder, s3)
+        else:
+            session = Session()
+            with ThreadPoolExecutor(max_workers=args.num_workers) as executor:
+                futures = [
+                    executor.submit(
+                        download_file_from_s3,
+                        url,
+                        folder,
+                        s3,
+                    )
+                    for url in new_urls
+                ]
+                for _ in tqdm(as_completed(futures), total=len(new_urls)):
+                    pass
+
     else:
-        session = Session()
-        with ThreadPoolExecutor(max_workers=args.num_workers) as executor:
-            futures = [
-                executor.submit(
-                    download_file,
-                    url,
-                    folder,
-                    session,
-                )
-                for url in new_urls
-            ]
-            for _ in tqdm(as_completed(futures), total=len(new_urls)):
-                pass
+        print(f"starting downloads from IRSA using {args.num_workers} workers")
+
+        if args.num_workers == 1:
+            for url in tqdm(new_urls):
+                download_file(url, folder)
+        else:
+            session = Session()
+            with ThreadPoolExecutor(max_workers=args.num_workers) as executor:
+                futures = [
+                    executor.submit(
+                        download_file,
+                        url,
+                        folder,
+                        session,
+                    )
+                    for url in new_urls
+                ]
+                for _ in tqdm(as_completed(futures), total=len(new_urls)):
+                    pass
 
 
 if __name__ == "__main__":
